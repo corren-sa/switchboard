@@ -1,0 +1,11 @@
+#!/bin/sh
+
+commit_regex='^(\[WCS-[0-9]{1,}\]\s(\w+\b\W*){3,}|(Merge branch .+)|(Merge pull request .+)) '
+
+if ! grep -E "$commit_regex" "$1"; then
+  echo "Invalid commit message." 1>&2
+  echo "Please ensure the commit message starts with ticket number and contains at least three words." 1>&2
+  echo "For instance:" 1>&2
+  echo "    [WCS-515] Extended api about delete function" 1>&2
+  exit 1
+fi
