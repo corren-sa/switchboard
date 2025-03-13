@@ -1,0 +1,107 @@
+@Library("Jenkinslibs@master")
+import io.interface21.jenkins.steps.*
+final def INPUT_PARAM_NAME = "Stage"
+def emailSteps = new EmailSteps(this)
+def pipelineSteps = new PipelineSteps(this)
+def scmSteps = new SCMSteps(this)
+def pipelineTypeString = pipelineType.getChoiceString()
+def projectName = pipelineSteps.multiBranchDisplayName()
+
+// Project variables
+def pom = ""
+
+// Deploy variables
+def cfgEnvFile = '/home/toolmgr/tools/corren-servers/vm2-devtest/INT/.env'
+def ptPath = '/home/corren/projects/org.openwms.projects.corren.pt'
+def environment = 'INT'
+def dockerImageName = ""
+def dockerImagePath = "interface21.io"
+def dockerImageRepo = "rc1"
+def dockerImageRegistry = "rc1.openwms.cloud"
+def dockerServiceName = ""
+def dockerStackName = "int-env"
+def appServerHostname = "10.55.50.11"
+def nexusHostname = "repo.openwms.cloud"
+
+final def credentialsId = "github"
+
+pipeline {
+	agent any
+
+	options {
+	    disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '10', artifactNumToKeepStr: '10'))
+	}
+
+	tools {
+	    maven 'mvn398'
+		jdk 'jdk21'
+	}
+
+	stages {
+		stage("Setup") {
+			steps {
+				script {
+					pom = readMavenPom file: 'pom.xml'
+					if (pom.properties['dockerImageName'] == null || pom.properties['dockerServiceName'] == null) {
+					    error('Properties (dockerImageName,dockerServiceName) must be defined in the pom.xml')
+                    }
+					dockerImageName = dockerImagePath+"/"+pom.properties['dockerImageName']
+					dockerServiceName = pom.properties['dockerServiceName']
+                    SH_BUILD_USER_ID = sh (script: 'id -un', returnStdout: true).trim()
+				}
+			}
+		}
+
+        stage("Rollout") {
+            steps {
+                script {
+                    log.outputBanner("R O L L O U T")
+                    def version = input message: "Please select the version to deploy", ok: "Deploy", parameters: [
+                        choice(name: "Version",
+                        choices: pipelineSteps.getNexusArtifacts('rc1', "https://${nexusHostname}", dockerImageRepo, dockerImageName),
+                        description: "The released version of the Docker container to roll out")
+                    ]
+                    echo "Version $version selected"
+					def remote = [:]
+					remote.name = "node"
+					remote.allowAnyHosts = true
+					withCredentials([sshUserPrivateKey(credentialsId: 'DeployINTCredentialId', keyFileVariable: 'identity', passphraseVariable: 'passphrase', usernameVariable: 'username'),
+					                 usernamePassword(credentialsId: 'rc1', usernameVariable: 'userJIB', passwordVariable: 'passwordJIB')]){
+                            remote.user = username
+                            remote.identityFile = identity
+        					remote.host = appServerHostname
+                            remote.passphrase = passphrase
+                            sshCommand remote: remote, command: "cd /home/corren/projects/org.openwms.projects.corren.pt"
+                            sshCommand remote: remote, command: "docker pull ${dockerImageRegistry}/${dockerImageName}:${version}"
+                            sshCommand remote: remote, command: "VERSION=${version} CFG_ENV_FILE=${cfgEnvFile} docker compose -f ${ptPath}/deploy/docker-compose-APP-base.yml -f ${ptPath}/deploy/${environment}/docker-compose-APP.yml -p ${dockerStackName} up -d ${dockerServiceName}"
+                            sshCommand remote: remote, command: "docker image prune -f"
+					}
+                }
+            }
+        }
+    }
+
+	post {
+        success {
+            script {
+            	log.outputBanner("Sending notification")
+                currentBuild.result = "SUCCESS"
+            }
+        }
+        failure {
+            script {
+            	log.outputBanner("Sending notification")
+                currentBuild.result = "FAILURE"
+                emailSteps.sendMailToCulprits(projectName)
+            }
+        }
+        unstable {
+            script {
+            	log.outputBanner("Sending notification")
+                currentBuild.result = "UNSTABLE"
+                emailSteps.sendMail("", projectName)
+            }
+        }
+    }
+}

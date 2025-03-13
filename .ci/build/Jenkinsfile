@@ -1,0 +1,168 @@
+@Library("Jenkinslibs@master")
+import io.interface21.jenkins.steps.*
+final def INPUT_PARAM_NAME = "Stage"
+def emailSteps = new EmailSteps(this)
+def pipelineSteps = new PipelineSteps(this)
+def scmSteps = new SCMSteps(this)
+def pipelineTypeString = pipelineType.getChoiceString()
+def projectName = pipelineSteps.multiBranchDisplayName()
+
+// Project variables
+def mvnParams = ""
+def pom = ""
+def pKey = ""
+def pName = ""
+def message = '[Jenkins] Release from build pipeline'
+
+// Deploy variables
+def dockerImagePath = "interface21.io"
+def dockerImageRegistry = "rc1.openwms.cloud"
+def dockerServiceName = ""
+def uniqueVersion = ""
+def dockerStackName = "wms"
+def appServerHostname = "10.55.50.11"
+
+final def credentialsId = "github"
+
+// SonarQube variables
+def sonarQubeInstallation = "SonarQube"
+
+pipeline {
+	agent any
+
+	options {
+	    disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '10', artifactNumToKeepStr: '10'))
+	}
+
+	tools {
+	    maven 'mvn398'
+		jdk 'jdk21'
+	}
+
+    environment {
+        MAVEN_OPTS = '-Xmx1024m -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn'
+        JAVA_HOME = '/var/jenkins_home/tools/hudson.model.JDK/jdk21/jdk-21.0.3'
+    }
+
+	stages {
+		stage("Setup") {
+			steps {
+				script {
+					pom = readMavenPom file: 'pom.xml'
+					if (pom.properties['dockerImageName'] == null || pom.properties['dockerServiceName'] == null) {
+					    error('Properties (dockerImageName,dockerServiceName) must be defined in the pom.xml')
+                    }
+					dockerImageName = dockerImagePath+"/"+pom.properties['dockerImageName']
+					dockerServiceName = pom.properties['dockerServiceName']
+					uniqueVersion = pom.version.replace("-SNAPSHOT", '') + "-" + env.BUILD_NUMBER + "-" + new Date().format("dd.MM.yyyy_HHmm")
+					env.TAG_LABEL = uniqueVersion
+					env.TAG_MESSAGE = message
+					env.REVISION = env.GIT_COMMIT
+                    pKey = pom.artifactId.replaceAll("\\.", '_')
+                    pName = pom.name
+				}
+			}
+		}
+
+        stage("SonarQube") {
+            when {
+                expression {
+                    env.BRANCH_NAME != 'main' && env.BRANCH_NAME != 'master' && !env.BRANCH_NAME.startsWith("PR-")
+                }
+            }
+            steps {
+                echo "Running SonarQube scan..."
+                withSonarQubeEnv(installationName: sonarQubeInstallation) {
+                    script {
+                        log.outputBanner("S C A N")
+                        sonarUniqueVersion = env.BRANCH_NAME + "-" + uniqueVersion;
+                        sh script: """
+                            mvn clean verify \
+                            org.sonarsource.scanner.maven:sonar-maven-plugin:3.7.0.1746:sonar \
+                            -Dsonar.java.source=21 \
+                            -Dsonar.sources=src/main/java,src/main/resources \
+                            -Dsonar.projectVersion=${sonarUniqueVersion} \
+                            -Pcoverage -B
+                        """
+                    }
+                }
+            }
+        }
+
+        stage("Quality Gate") {
+            when {
+                expression {
+                    env.BRANCH_NAME != 'main' && env.BRANCH_NAME != 'master' && !env.BRANCH_NAME.startsWith("PR-")
+                }
+            }
+            steps {
+                timeout(time: 3, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+		stage("Build > Test > Package") {
+            steps {
+                script {
+                    log.outputBanner("B U I L D  >>  T E S T  >>  P A C K A G E")
+                    goal = env.BRANCH_NAME == 'main' || env.BRANCH_NAME == 'master' ? "deploy" : "verify"
+                    sh script: """
+                        mvn clean ${goal} \
+                        -Dversion=${uniqueVersion} \
+                        -Dci.buildNumber=${env.BUILD_NUMBER} -B
+                    """
+                    junit allowEmptyResults: true, testResults: 'target/surefire-reports/TEST-*.xml'
+                    pipelineSteps.archiveArtifacts("target/*.jar", "")
+                }
+            }
+        }
+
+        stage("Archive TEST") {
+            when {
+                expression {
+                    env.BRANCH_NAME == 'main' || env.BRANCH_NAME == 'master'
+                }
+            }
+
+            steps {
+            	script {
+            	    log.outputBanner("A R C H I V E")
+                    sh "docker build -t ${dockerImageRegistry}/${dockerImageName}:latest ."
+                    sh "docker image tag ${dockerImageRegistry}/${dockerImageName}:latest ${dockerImageRegistry}/${dockerImageName}:${uniqueVersion}"
+                    withCredentials([usernamePassword(credentialsId: 'rc1', usernameVariable: 'userJIB', passwordVariable: 'passwordJIB')]) {
+                        sh 'echo $passwordJIB | docker login -u $userJIB --password-stdin https://'+dockerImageRegistry
+                        sh "docker push ${dockerImageRegistry}/${dockerImageName}:latest"
+                        sh "docker push ${dockerImageRegistry}/${dockerImageName}:${uniqueVersion}"
+                        sh "docker logout https://"+dockerImageRegistry
+                    }
+                    sh "docker image prune -f"
+            	}
+            }
+        }
+	}
+
+	post {
+        success {
+            script {
+            	log.outputBanner("Sending notification")
+                currentBuild.result = "SUCCESS"
+            }
+        }
+        failure {
+            script {
+            	log.outputBanner("Sending notification")
+                currentBuild.result = "FAILURE"
+                emailSteps.sendMailToCulprits(projectName)
+            }
+        }
+        unstable {
+            script {
+            	log.outputBanner("Sending notification")
+                currentBuild.result = "UNSTABLE"
+                emailSteps.sendMailToCulprits(projectName)
+            }
+        }
+    }
+}

@@ -1,0 +1,1 @@
+package org.openwms.projects.corren.switchboard.entities;
