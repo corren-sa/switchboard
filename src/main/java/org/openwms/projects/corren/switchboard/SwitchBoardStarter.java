@@ -19,7 +19,7 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
 /**
- * A ShuttleStarter is the starter class of the SpringBoot application.
+ * A SwitchBoardStarter is the starter class of the SpringBoot application.
  */
 @SpringBootApplication
 public class SwitchBoardStarter { public static void main(String[] args)

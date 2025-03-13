@@ -56,7 +56,7 @@ class SwitchBoardAsyncConfiguration {
   return new Jackson2JsonMessageConverter();
  }
 
- @ConditionalOnExpression("'${owms.shuttle.serialization}'=='barray'")
+ @ConditionalOnExpression("'${owms.switchboard.serialization}'=='barray'")
  @Bean
  MessageConverter serializerMessageConverter() {
   BOOT_LOGGER.info("Using byte array serialization over AMQP");
